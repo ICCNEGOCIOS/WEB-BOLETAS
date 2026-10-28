@@ -86,7 +86,7 @@ footer{text-align:center;color:var(--mu);font:500 11px Cinzel,Georgia,serif;lett
 const CONFIG={
  keys:{gemini:'AQ.Ab8RN6Jq9iBJ0TW5ShUDIglEnHLJmW9klGwtVt1pYoO0Rc_Y0A',openrouter:'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',groq:'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',ocrspace:'K8618876872675688957'},
  order:['gemini','openrouter','groq'], // IAs con visión; si todas fallan se usa OCR.space + IA de texto // si una falla, prueba la siguiente
- models:{gemini:'gemini-2.5-flash',mistral:'mistral-small-latest',openrouter:'openrouter/free',groq:'meta-llama/llama-4-scout-17b-16e-instruct'},
+ models:{gemini:['gemini-flash-latest','gemini-3.5-flash','gemini-3.1-flash-lite'],openrouter:'openrouter/free',groq:['meta-llama/llama-4-scout-17b-16e-instruct']},
  SHEETS_URL:'https://script.google.com/macros/s/AKfycbwfp3Qn1jlIsT1moM7G4AYPqDkTY857yAbBOehpd4TRqFyWsNc4mSbrssIRbSt-DNkauQ/exec' // <- pega aquí la URL de tu Apps Script (termina en /exec)
 };
 const $=s=>document.getElementById(s),UMBRAL=10; // cantidad >= 10 => por mayor
@@ -113,7 +113,7 @@ const store={
   if(U){await fetch(U,{method:"POST",body:JSON.stringify({action:"delete",id})});return}
   localStorage.setItem("soleph_rows",JSON.stringify(JSON.parse(localStorage.getItem("soleph_rows")||"[]").filter(x=>x.id!==id)))}
 };
-async function refresh(){try{rows=await store.load();render()}catch(e){toast("No pude leer Google Sheets: "+e.message)}}
+async function refresh(){try{rows=await store.load();render()}catch(e){toast("No pude leer Google Sheets ("+e.message+"). Abre la URL del script en el navegador: si pide iniciar sesión, la implementación debe tener acceso para «Cualquier usuario».")}}
 $("mode").textContent=U?"🟢 Conectado a Google Sheets: todo lo que subas se guarda allí.":"🟡 Modo local (este navegador). Pega la URL de tu Apps Script en CONFIG.SHEETS_URL para guardar en Google Sheets.";
 refresh();
 
@@ -140,14 +140,22 @@ Reglas: emisor es MOVIL CAR si la boleta es de Movilcar S.R.L., YGE si es de M&A
 const OAI={mistral:'https://api.mistral.ai/v1/chat/completions',openrouter:'https://openrouter.ai/api/v1/chat/completions',groq:'https://api.groq.com/openai/v1/chat/completions'};
 const parse=t=>JSON.parse(String(t).replace(/```json|```/g,"").trim());
 async function callAI(p,imgs,intento=0,extra=""){
- const key=CONFIG.keys[p],model=(!imgs.length&&p==='groq')?'llama-3.3-70b-versatile':CONFIG.models[p];
- if(p==="gemini"){
-  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify({contents:[{parts:[{text:PROMPT+extra},...imgs.map(d=>({inline_data:{mime_type:"image/jpeg",data:d}}))]}],generationConfig:{responseMimeType:"application/json",temperature:0}})});
-  if(r.status===429&&intento<2){await new Promise(z=>setTimeout(z,3500*(intento+1)));return callAI(p,imgs,intento+1,extra)}
-  const j=await r.json();if(!r.ok)throw new Error(j.error?.message||r.status);return parse(j.candidates[0].content.parts.map(x=>x.text).join(""))}
- const r=await fetch(OAI[p],{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+key},body:JSON.stringify({model,temperature:0,...(p==='openrouter'?{}:{response_format:{type:"json_object"}}),messages:[{role:"user",content:[{type:"text",text:PROMPT+extra},...imgs.map(d=>({type:"image_url",image_url:{url:"data:image/jpeg;base64,"+d}}))]}]})});
- if(r.status===429&&intento<2){$("lt").textContent=`${p}: límite de uso, reintentando…`;await new Promise(z=>setTimeout(z,3500*(intento+1)));return callAI(p,imgs,intento+1,extra)}
- const j=await r.json();if(!r.ok)throw new Error(j.error?.message||r.status);return parse(j.choices[0].message.content)}
+ const key=CONFIG.keys[p];let ms=[].concat(CONFIG.models[p]);
+ if(p==="groq"){
+  if(!imgs.length)ms=["llama-3.3-70b-versatile"];
+  if(!CONFIG.gq){try{CONFIG.gq=((await(await fetch("https://api.groq.com/openai/v1/models",{headers:{Authorization:"Bearer "+key}})).json()).data||[]).map(m=>m.id)}catch(e){CONFIG.gq=[]}}
+  const re=imgs.length?/llama-4|vision|-vl/i:/llama|gpt-oss|qwen/i;
+  ms=[...new Set([...ms,...CONFIG.gq.filter(id=>re.test(id)&&!/guard|whisper|tts|prompt|safeguard/i.test(id))])]}
+ let last="";
+ for(const model of ms){
+  let r;
+  if(p==="gemini")r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify({contents:[{parts:[{text:PROMPT+extra},...imgs.map(d=>({inline_data:{mime_type:"image/jpeg",data:d}}))]}],generationConfig:{responseMimeType:"application/json",temperature:0}})});
+  else r=await fetch(OAI[p],{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+key},body:JSON.stringify({model,temperature:0,...(p==="openrouter"?{}:{response_format:{type:"json_object"}}),messages:[{role:"user",content:[{type:"text",text:PROMPT+extra},...imgs.map(d=>({type:"image_url",image_url:{url:"data:image/jpeg;base64,"+d}}))]}]})});
+  if(r.status===404){last=model;continue}
+  if(r.status===429&&intento<2){$("lt").textContent=`${p}: límite de uso, reintentando…`;await new Promise(z=>setTimeout(z,3500*(intento+1)));return callAI(p,imgs,intento+1,extra)}
+  const j=await r.json();if(!r.ok)throw new Error(j.error?.message||r.status);
+  return parse(p==="gemini"?j.candidates[0].content.parts.map(x=>x.text).join(""):j.choices[0].message.content)}
+ throw new Error("ningún modelo disponible (último probado: "+last+")")}
 async function extract(imgs){let err=[];
  for(const p of CONFIG.order){if(!CONFIG.keys[p])continue;$("lt").textContent=`Leyendo con ${p}…`;
   try{const r=await callAI(p,imgs);if(r&&Array.isArray(r.items)&&r.items.length)return r;err.push(p+": sin productos")}catch(e){err.push(p+": "+e.message)}}
